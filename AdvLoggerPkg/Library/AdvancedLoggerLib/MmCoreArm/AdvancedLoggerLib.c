@@ -128,7 +128,10 @@ AdvancedLoggerGetLoggerInfo (
       return NULL;
     }
 
-    mLoggerInfo->HwPrintLevel = FixedPcdGet32 (PcdAdvancedLoggerHdwPortDebugPrintErrorLevel);
+    if (!mLoggerInfo->HdwPortInitialized) {
+      mLoggerInfo->HwPrintLevel       = FixedPcdGet32 (PcdAdvancedLoggerHdwPortDebugPrintErrorLevel);
+      mLoggerInfo->HdwPortInitialized = TRUE;
+    }
 
     mMaxAddress = mLoggerInfo->LogBuffer + mLoggerInfo->LogBufferSize;
     mBufferSize = mLoggerInfo->LogBufferSize;
