@@ -12,8 +12,35 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
 
-#include "Bds.h"
-#include "Language.h"
+
+#include <Uefi.h>
+#include <Guid/GlobalVariable.h>
+#include <Guid/ConnectConInEvent.h>
+#include <Guid/StatusCodeDataTypeVariable.h>
+#include <Guid/EventGroup.h>
+
+#include <Protocol/Bds.h>
+#include <Protocol/LoadedImage.h>
+#include <Protocol/VariableLock.h>
+#include <Protocol/DeferredImageLoad.h>
+
+#include <Library/UefiDriverEntryPoint.h>
+#include <Library/DebugLib.h>
+#include <Library/BaseMemoryLib.h>
+#include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiRuntimeServicesTableLib.h>
+#include <Library/UefiLib.h>
+#include <Library/MemoryAllocationLib.h>
+#include <Library/ReportStatusCodeLib.h>
+#include <Library/BaseLib.h>
+#include <Library/PcdLib.h>
+#include <Library/PerformanceLib.h>
+#include <Library/DevicePathLib.h>
+#include <Library/PrintLib.h>
+
+#include <Library/UefiBootManagerLib.h>
+#include <Library/PlatformBootManagerLib.h>
+
 #include "HwErrRecSupport.h"
 
 #define SET_BOOT_OPTION_SUPPORT_KEY_COUNT(a, c)  { \
@@ -49,6 +76,62 @@ CHAR16  *mBdsLoadOptionName[] = {
   L"Boot",
   L"PlatformRecovery"
 };
+
+/**
+
+  Service routine for BdsInstance->Entry(). Devices are connected, the
+  consoles are initialized, and the boot options are tried.
+
+  @param This            Protocol Instance structure.
+
+**/
+VOID
+EFIAPI
+BdsEntry (
+  IN  EFI_BDS_ARCH_PROTOCOL  *This
+  );
+
+/**
+  Set the variable and report the error through status code upon failure.
+
+  @param  VariableName           A Null-terminated string that is the name of the vendor's variable.
+                                 Each VariableName is unique for each VendorGuid. VariableName must
+                                 contain 1 or more characters. If VariableName is an empty string,
+                                 then EFI_INVALID_PARAMETER is returned.
+  @param  VendorGuid             A unique identifier for the vendor.
+  @param  Attributes             Attributes bitmask to set for the variable.
+  @param  DataSize               The size in bytes of the Data buffer. Unless the EFI_VARIABLE_APPEND_WRITE,
+                                 or EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS attribute is set, a size of zero
+                                 causes the variable to be deleted. When the EFI_VARIABLE_APPEND_WRITE attribute is
+                                 set, then a SetVariable() call with a DataSize of zero will not cause any change to
+                                 the variable value (the timestamp associated with the variable may be updated however
+                                 even if no new data value is provided,see the description of the
+                                 EFI_VARIABLE_AUTHENTICATION_2 descriptor below. In this case the DataSize will not
+                                 be zero since the EFI_VARIABLE_AUTHENTICATION_2 descriptor will be populated).
+  @param  Data                   The contents for the variable.
+
+  @retval EFI_SUCCESS            The firmware has successfully stored the variable and its data as
+                                 defined by the Attributes.
+  @retval EFI_INVALID_PARAMETER  An invalid combination of attribute bits, name, and GUID was supplied, or the
+                                 DataSize exceeds the maximum allowed.
+  @retval EFI_INVALID_PARAMETER  VariableName is an empty string.
+  @retval EFI_OUT_OF_RESOURCES   Not enough storage is available to hold the variable and its data.
+  @retval EFI_DEVICE_ERROR       The variable could not be retrieved due to a hardware error.
+  @retval EFI_WRITE_PROTECTED    The variable in question is read-only.
+  @retval EFI_WRITE_PROTECTED    The variable in question cannot be deleted.
+  @retval EFI_SECURITY_VIOLATION The variable could not be written due to EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACESS
+                                 being set, but the AuthInfo does NOT pass the validation check carried out by the firmware.
+
+  @retval EFI_NOT_FOUND          The variable trying to be updated or deleted was not found.
+**/
+EFI_STATUS
+BdsDxeSetVariableAndReportStatusCodeOnError (
+  IN CHAR16    *VariableName,
+  IN EFI_GUID  *VendorGuid,
+  IN UINT32    Attributes,
+  IN UINTN     DataSize,
+  IN VOID      *Data
+  );
 
 /**
   Event to Connect ConIn.
@@ -212,155 +295,6 @@ BdsInitialize (
     ASSERT_EFI_ERROR (Status);
     );
   return Status;
-}
-
-/**
-  Function waits for a given event to fire, or for an optional timeout to expire.
-
-  @param   Event              The event to wait for
-  @param   Timeout            An optional timeout value in 100 ns units.
-
-  @retval  EFI_SUCCESS      Event fired before Timeout expired.
-  @retval  EFI_TIME_OUT     Timout expired before Event fired..
-
-**/
-EFI_STATUS
-BdsWaitForSingleEvent (
-  IN  EFI_EVENT  Event,
-  IN  UINT64     Timeout       OPTIONAL
-  )
-{
-  UINTN       Index;
-  EFI_STATUS  Status;
-  EFI_EVENT   TimerEvent;
-  EFI_EVENT   WaitList[2];
-
-  if (Timeout != 0) {
-    //
-    // Create a timer event
-    //
-    Status = gBS->CreateEvent (EVT_TIMER, 0, NULL, NULL, &TimerEvent);
-    if (!EFI_ERROR (Status)) {
-      //
-      // Set the timer event
-      //
-      gBS->SetTimer (
-             TimerEvent,
-             TimerRelative,
-             Timeout
-             );
-
-      //
-      // Wait for the original event or the timer
-      //
-      WaitList[0] = Event;
-      WaitList[1] = TimerEvent;
-      Status      = gBS->WaitForEvent (2, WaitList, &Index);
-      ASSERT_EFI_ERROR (Status);
-      gBS->CloseEvent (TimerEvent);
-
-      //
-      // If the timer expired, change the return to timed out
-      //
-      if (Index == 1) {
-        Status = EFI_TIMEOUT;
-      }
-    }
-  } else {
-    //
-    // No timeout... just wait on the event
-    //
-    Status = gBS->WaitForEvent (1, &Event, &Index);
-    ASSERT (!EFI_ERROR (Status));
-    ASSERT (Index == 0);
-  }
-
-  return Status;
-}
-
-/**
-  The function reads user inputs.
-
-**/
-VOID
-BdsReadKeys (
-  VOID
-  )
-{
-  EFI_STATUS     Status;
-  EFI_INPUT_KEY  Key;
-
-  if (PcdGetBool (PcdConInConnectOnDemand)) {
-    return;
-  }
-
-  while (gST->ConIn != NULL) {
-    Status = gST->ConIn->ReadKeyStroke (gST->ConIn, &Key);
-
-    if (EFI_ERROR (Status)) {
-      //
-      // No more keys.
-      //
-      break;
-    }
-  }
-}
-
-/**
-  The function waits for the boot manager timeout expires or hotkey is pressed.
-
-  It calls PlatformBootManagerWaitCallback each second.
-
-  @param     HotkeyTriggered   Input hotkey event.
-**/
-VOID
-BdsWait (
-  IN EFI_EVENT  HotkeyTriggered
-  )
-{
-  EFI_STATUS  Status;
-  UINT16      TimeoutRemain;
-
-  DEBUG ((DEBUG_INFO, "[Bds]BdsWait ...Zzzzzzzzzzzz...\n"));
-
-  TimeoutRemain = PcdGet16 (PcdPlatformBootTimeOut);
-  while (TimeoutRemain != 0) {
-    DEBUG ((DEBUG_INFO, "[Bds]BdsWait(%d)..Zzzz...\n", (UINTN)TimeoutRemain));
-    PlatformBootManagerWaitCallback (TimeoutRemain);
-
-    BdsReadKeys (); // BUGBUG: Only reading can signal HotkeyTriggered
-                    //         Can be removed after all keyboard drivers invoke callback in timer callback.
-
-    if (HotkeyTriggered != NULL) {
-      Status = BdsWaitForSingleEvent (HotkeyTriggered, EFI_TIMER_PERIOD_SECONDS (1));
-      if (!EFI_ERROR (Status)) {
-        break;
-      }
-    } else {
-      gBS->Stall (1000000);
-    }
-
-    //
-    // 0xffff means waiting forever
-    // BDS with no hotkey provided and 0xffff as timeout will "hang" in the loop
-    //
-    if (TimeoutRemain != 0xffff) {
-      TimeoutRemain--;
-    }
-  }
-
-  //
-  // If the platform configured a nonzero and finite time-out, and we have
-  // actually reached that, report 100% completion to the platform.
-  //
-  // Note that the (TimeoutRemain == 0) condition excludes
-  // PcdPlatformBootTimeOut=0xFFFF, and that's deliberate.
-  //
-  if ((PcdGet16 (PcdPlatformBootTimeOut) != 0) && (TimeoutRemain == 0)) {
-    PlatformBootManagerWaitCallback (0);
-  }
-
-  DEBUG ((DEBUG_INFO, "[Bds]Exit the waiting!\n"));
 }
 
 /**
@@ -677,6 +611,38 @@ BdsFormalizeEfiGlobalVariable (
 }
 
 /**
+  Set the HwErrRecSupport variable contains a binary UINT16 that supplies the
+  level of support for Hardware Error Record Persistence that is implemented
+  by the platform.
+
+**/
+VOID
+InitializeHwErrRecSupport (
+  VOID
+  )
+{
+  EFI_STATUS  Status;
+  UINT16      HardwareErrorRecordLevel;
+
+  HardwareErrorRecordLevel = PcdGet16 (PcdHardwareErrorRecordLevel);
+
+  if (HardwareErrorRecordLevel != 0) {
+    //
+    // If level value equal 0, no need set to 0 to variable area because UEFI specification
+    // define same behavior between no value or 0 value for L"HwErrRecSupport".
+    //
+    Status = gRT->SetVariable (
+                    L"HwErrRecSupport",
+                    &gEfiGlobalVariableGuid,
+                    EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS | EFI_VARIABLE_NON_VOLATILE,
+                    sizeof (UINT16),
+                    &HardwareErrorRecordLevel
+                    );
+    ASSERT_EFI_ERROR (Status);
+  }
+}
+
+/**
 
   Service routine for BdsInstance->Entry(). Devices are connected, the
   consoles are initialized, and the boot options are tried.
@@ -693,7 +659,6 @@ BdsEntry (
   EFI_BOOT_MANAGER_LOAD_OPTION  *LoadOptions;
   UINTN                         LoadOptionCount;
   CHAR16                        *FirmwareVendor;
-  EFI_EVENT                     HotkeyTriggered;
   UINT64                        OsIndication;
   UINTN                         DataSize;
   EFI_STATUS                    Status;
@@ -712,7 +677,6 @@ BdsEntry (
   EFI_STATUS                    BootManagerMenuStatus;
   EFI_BOOT_MANAGER_LOAD_OPTION  PlatformDefaultBootOption;
 
-  HotkeyTriggered = NULL;
   Status          = EFI_SUCCESS;
   BootSuccess     = FALSE;
 
@@ -777,13 +741,9 @@ BdsEntry (
 
   //
   // Initialize L"BootOptionSupport" EFI global variable.
-  // Lazy-ConIn implictly disables BDS hotkey.
   //
-  BootOptionSupport = EFI_BOOT_OPTION_SUPPORT_APP | EFI_BOOT_OPTION_SUPPORT_SYSPREP;
-  if (!PcdGetBool (PcdConInConnectOnDemand)) {
-    BootOptionSupport |= EFI_BOOT_OPTION_SUPPORT_KEY;
-    SET_BOOT_OPTION_SUPPORT_KEY_COUNT (BootOptionSupport, 3);
-  }
+  BootOptionSupport = EFI_BOOT_OPTION_SUPPORT_APP | EFI_BOOT_OPTION_SUPPORT_SYSPREP | EFI_BOOT_OPTION_SUPPORT_KEY;
+  SET_BOOT_OPTION_SUPPORT_KEY_COUNT (BootOptionSupport, 3);
 
   Status = gRT->SetVariable (
                   EFI_BOOT_OPTION_SUPPORT_VARIABLE_NAME,
@@ -811,57 +771,6 @@ BdsEntry (
   }
 
   //
-  // Initialize the platform language variables
-  //
-  InitializeLanguage (TRUE);
-
-  FilePath = FileDevicePath (NULL, EFI_REMOVABLE_MEDIA_FILE_NAME);
-  if (FilePath == NULL) {
-    DEBUG ((DEBUG_ERROR, "Fail to allocate memory for default boot file path. Unable to boot.\n"));
-    CpuDeadLoop ();
-  }
-
-  Status = EfiBootManagerInitializeLoadOption (
-             &PlatformDefaultBootOption,
-             LoadOptionNumberUnassigned,
-             LoadOptionTypePlatformRecovery,
-             LOAD_OPTION_ACTIVE,
-             L"Default PlatformRecovery",
-             FilePath,
-             NULL,
-             0
-             );
-  ASSERT_EFI_ERROR (Status);
-
-  //
-  // System firmware must include a PlatformRecovery#### variable specifying
-  // a short-form File Path Media Device Path containing the platform default
-  // file path for removable media if the platform supports Platform Recovery.
-  //
-  if (PcdGetBool (PcdPlatformRecoverySupport)) {
-    LoadOptions = EfiBootManagerGetLoadOptions (&LoadOptionCount, LoadOptionTypePlatformRecovery);
-    if (EfiBootManagerFindLoadOption (&PlatformDefaultBootOption, LoadOptions, LoadOptionCount) == -1) {
-      for (Index = 0; Index < LoadOptionCount; Index++) {
-        //
-        // The PlatformRecovery#### options are sorted by OptionNumber.
-        // Find the the smallest unused number as the new OptionNumber.
-        //
-        if (LoadOptions[Index].OptionNumber != Index) {
-          break;
-        }
-      }
-
-      PlatformDefaultBootOption.OptionNumber = Index;
-      Status                                 = EfiBootManagerLoadOptionToVariable (&PlatformDefaultBootOption);
-      ASSERT_EFI_ERROR (Status);
-    }
-
-    EfiBootManagerFreeLoadOptions (LoadOptions, LoadOptionCount);
-  }
-
-  FreePool (FilePath);
-
-  //
   // Report Status Code to indicate connecting drivers will happen
   //
   REPORT_STATUS_CODE (
@@ -872,18 +781,16 @@ BdsEntry (
   //
   // Initialize ConnectConIn event before calling platform code.
   //
-  if (PcdGetBool (PcdConInConnectOnDemand)) {
-    Status = gBS->CreateEventEx (
-                    EVT_NOTIFY_SIGNAL,
-                    TPL_CALLBACK,
-                    BdsDxeOnConnectConInCallBack,
-                    NULL,
-                    &gConnectConInEventGuid,
-                    &gConnectConInEvent
-                    );
-    if (EFI_ERROR (Status)) {
-      gConnectConInEvent = NULL;
-    }
+  Status = gBS->CreateEventEx (
+                  EVT_NOTIFY_SIGNAL,
+                  TPL_CALLBACK,
+                  BdsDxeOnConnectConInCallBack,
+                  NULL,
+                  &gConnectConInEventGuid,
+                  &gConnectConInEvent
+                  );
+  if (EFI_ERROR (Status)) {
+    gConnectConInEvent = NULL;
   }
 
   //
@@ -900,11 +807,6 @@ BdsEntry (
   PERF_INMODULE_END ("PlatformBootManagerBeforeConsole");
 
   //
-  // Initialize hotkey service
-  //
-  EfiBootManagerStartHotkeyService (&HotkeyTriggered);
-
-  //
   // Execute Driver Options
   //
   LoadOptions = EfiBootManagerGetLoadOptions (&LoadOptionCount, LoadOptionTypeDriver);
@@ -917,15 +819,8 @@ BdsEntry (
   // Connect consoles
   //
   PERF_INMODULE_BEGIN ("EfiBootManagerConnectAllDefaultConsoles");
-  if (PcdGetBool (PcdConInConnectOnDemand)) {
-    EfiBootManagerConnectConsoleVariable (ConOut);
-    EfiBootManagerConnectConsoleVariable (ErrOut);
-    //
-    // Do not connect ConIn devices when lazy ConIn feature is ON.
-    //
-  } else {
-    EfiBootManagerConnectAllDefaultConsoles ();
-  }
+  EfiBootManagerConnectConsoleVariable (ConOut);
+  EfiBootManagerConnectConsoleVariable (ErrOut);
 
   PERF_INMODULE_END ("EfiBootManagerConnectAllDefaultConsoles");
 
@@ -956,7 +851,7 @@ BdsEntry (
   }
 
   //
-  // Boot to Boot Manager Menu when EFI_OS_INDICATIONS_BOOT_TO_FW_UI is set. Skip HotkeyBoot
+  // Boot to Boot Manager Menu when EFI_OS_INDICATIONS_BOOT_TO_FW_UI is set.
   //
   DataSize = sizeof (UINT64);
   Status   = gRT->GetVariable (
@@ -1027,15 +922,13 @@ BdsEntry (
   }
 
   //
-  // Launch Boot Manager Menu directly when EFI_OS_INDICATIONS_BOOT_TO_FW_UI is set. Skip HotkeyBoot
+  // Launch Boot Manager Menu directly when EFI_OS_INDICATIONS_BOOT_TO_FW_UI is set.
   //
   if (BootFwUi && (BootManagerMenuStatus != EFI_NOT_FOUND)) {
     //
     // Follow generic rule, Call BdsDxeOnConnectConInCallBack to connect ConIn before enter UI
     //
-    if (PcdGetBool (PcdConInConnectOnDemand)) {
-      BdsDxeOnConnectConInCallBack (NULL, NULL);
-    }
+    BdsDxeOnConnectConInCallBack (NULL, NULL);
 
     //
     // Directly enter the setup page.
@@ -1052,19 +945,6 @@ BdsEntry (
       ProcessLoadOptions (LoadOptions, LoadOptionCount);
       EfiBootManagerFreeLoadOptions (LoadOptions, LoadOptionCount);
     }
-
-    //
-    // Execute Key####
-    //
-    PERF_INMODULE_BEGIN ("BdsWait");
-    BdsWait (HotkeyTriggered);
-    PERF_INMODULE_END ("BdsWait");
-    //
-    // BdsReadKeys() can be removed after all keyboard drivers invoke callback in timer callback.
-    //
-    BdsReadKeys ();
-
-    EfiBootManagerHotkeyBoot ();
 
     PlatformBootManagerPriorityBoot (&BootNext);          // MSCHANGE 00076  Check for hard button boot selection
 
