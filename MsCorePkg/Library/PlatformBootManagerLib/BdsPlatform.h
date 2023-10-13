@@ -46,43 +46,10 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 
 #include <IndustryStandard/Pci30.h>
 
-#define gPciRootBridge \
-  { \
-    { \
-      ACPI_DEVICE_PATH, ACPI_DP, \
-      { \
-        (UINT8) (sizeof (ACPI_HID_DEVICE_PATH)), (UINT8) \
-        ((sizeof (ACPI_HID_DEVICE_PATH)) >> 8) \
-      } \
-    }, \
-    EISA_PNP_ID (0x0A03), 0 \
-  }
-
 #define gEndEntire \
   { \
     END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE, { END_DEVICE_PATH_LENGTH, 0 } \
   }
-
-//
-// Platform Root Bridge
-//
-typedef struct {
-  ACPI_HID_DEVICE_PATH        PciRootBridge;
-  EFI_DEVICE_PATH_PROTOCOL    End;
-} PLATFORM_ROOT_BRIDGE_DEVICE_PATH;
-
-typedef struct {
-  ACPI_HID_DEVICE_PATH        PciRootBridge;
-  PCI_DEVICE_PATH             PciDevice;
-  EFI_DEVICE_PATH_PROTOCOL    End;
-} PLATFORM_ONBOARD_CONTROLLER_DEVICE_PATH;
-
-typedef struct {
-  ACPI_HID_DEVICE_PATH        PciRootBridge;
-  PCI_DEVICE_PATH             PciBridge;
-  PCI_DEVICE_PATH             PciDevice;
-  EFI_DEVICE_PATH_PROTOCOL    End;
-} PLATFORM_PCI_CONTROLLER_DEVICE_PATH;
 
 //
 // Below is the boot option device path
@@ -114,41 +81,6 @@ typedef struct {
 EFI_STATUS
 MemoryTest (
   IN EXTENDMEM_COVERAGE_LEVEL  Level
-  );
-
-/*++
-
-Routine Description:
-
-Connect with predefined platform connect sequence,
-the OEM/IBV can customize with their own connect sequence.
-
-Arguments:
-
-BootMode                              Boot mode of this boot.
-
-Returns:
-
-None.
-
---*/
-VOID
-ConnectSequence (
-  VOID
-  );
-
-EFI_STATUS
-EFIAPI
-EfiPlatformBootManagerProcessCapsules (
-  VOID
-  );
-
-//
-// MSChange - Make this function available to TcgPhysicalPresence.c
-//
-BOOLEAN
-IsGopDevicePath (
-  EFI_DEVICE_PATH_PROTOCOL  *DevicePath
   );
 
 #endif

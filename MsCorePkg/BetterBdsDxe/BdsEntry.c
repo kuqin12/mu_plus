@@ -40,12 +40,37 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 
 #include <Library/UefiBootManagerLib.h>
 #include <Library/PlatformBootManagerLib.h>
-
-#include "HwErrRecSupport.h"
+#include <Library/DeviceBootManagerLib.h>
 
 #define SET_BOOT_OPTION_SUPPORT_KEY_COUNT(a, c)  { \
       (a) = ((a) & ~EFI_BOOT_OPTION_SUPPORT_COUNT) | (((c) << LowBitSet32 (EFI_BOOT_OPTION_SUPPORT_COUNT)) & EFI_BOOT_OPTION_SUPPORT_COUNT); \
       }
+
+typedef enum {
+  BdsCheckOsIndication,
+  BdsPriorityBoot,
+  BdsBootNext,
+  BdsBootNormalPrepare,
+  BdsBootNormal,
+  BdsNormalEnd,
+  BdsBootMenu,
+  BdsBootCannotBoot,
+  BdsBootMaxNum
+} BDS_BOOT_STATE;
+
+/**
+
+  Service routine for BdsInstance->Entry(). Devices are connected, the
+  consoles are initialized, and the boot options are tried.
+
+  @param This            Protocol Instance structure.
+
+**/
+VOID
+EFIAPI
+BdsEntry (
+  IN  EFI_BDS_ARCH_PROTOCOL  *This
+  );
 
 ///
 /// BDS arch protocol instance initial value.
@@ -76,62 +101,6 @@ CHAR16  *mBdsLoadOptionName[] = {
   L"Boot",
   L"PlatformRecovery"
 };
-
-/**
-
-  Service routine for BdsInstance->Entry(). Devices are connected, the
-  consoles are initialized, and the boot options are tried.
-
-  @param This            Protocol Instance structure.
-
-**/
-VOID
-EFIAPI
-BdsEntry (
-  IN  EFI_BDS_ARCH_PROTOCOL  *This
-  );
-
-/**
-  Set the variable and report the error through status code upon failure.
-
-  @param  VariableName           A Null-terminated string that is the name of the vendor's variable.
-                                 Each VariableName is unique for each VendorGuid. VariableName must
-                                 contain 1 or more characters. If VariableName is an empty string,
-                                 then EFI_INVALID_PARAMETER is returned.
-  @param  VendorGuid             A unique identifier for the vendor.
-  @param  Attributes             Attributes bitmask to set for the variable.
-  @param  DataSize               The size in bytes of the Data buffer. Unless the EFI_VARIABLE_APPEND_WRITE,
-                                 or EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS attribute is set, a size of zero
-                                 causes the variable to be deleted. When the EFI_VARIABLE_APPEND_WRITE attribute is
-                                 set, then a SetVariable() call with a DataSize of zero will not cause any change to
-                                 the variable value (the timestamp associated with the variable may be updated however
-                                 even if no new data value is provided,see the description of the
-                                 EFI_VARIABLE_AUTHENTICATION_2 descriptor below. In this case the DataSize will not
-                                 be zero since the EFI_VARIABLE_AUTHENTICATION_2 descriptor will be populated).
-  @param  Data                   The contents for the variable.
-
-  @retval EFI_SUCCESS            The firmware has successfully stored the variable and its data as
-                                 defined by the Attributes.
-  @retval EFI_INVALID_PARAMETER  An invalid combination of attribute bits, name, and GUID was supplied, or the
-                                 DataSize exceeds the maximum allowed.
-  @retval EFI_INVALID_PARAMETER  VariableName is an empty string.
-  @retval EFI_OUT_OF_RESOURCES   Not enough storage is available to hold the variable and its data.
-  @retval EFI_DEVICE_ERROR       The variable could not be retrieved due to a hardware error.
-  @retval EFI_WRITE_PROTECTED    The variable in question is read-only.
-  @retval EFI_WRITE_PROTECTED    The variable in question cannot be deleted.
-  @retval EFI_SECURITY_VIOLATION The variable could not be written due to EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACESS
-                                 being set, but the AuthInfo does NOT pass the validation check carried out by the firmware.
-
-  @retval EFI_NOT_FOUND          The variable trying to be updated or deleted was not found.
-**/
-EFI_STATUS
-BdsDxeSetVariableAndReportStatusCodeOnError (
-  IN CHAR16    *VariableName,
-  IN EFI_GUID  *VendorGuid,
-  IN UINT32    Attributes,
-  IN UINTN     DataSize,
-  IN VOID      *Data
-  );
 
 /**
   Event to Connect ConIn.
@@ -295,91 +264,6 @@ BdsInitialize (
     ASSERT_EFI_ERROR (Status);
     );
   return Status;
-}
-
-/**
-  Attempt to boot each boot option in the BootOptions array.
-
-  @param BootOptions       Input boot option array.
-  @param BootOptionCount   Input boot option count.
-  @param BootManagerMenu   Input boot manager menu.
-
-  @retval TRUE  Successfully boot one of the boot options.
-  @retval FALSE Failed boot any of the boot options.
-**/
-BOOLEAN
-BootBootOptions (
-  IN EFI_BOOT_MANAGER_LOAD_OPTION  *BootOptions,
-  IN UINTN                         BootOptionCount,
-  IN EFI_BOOT_MANAGER_LOAD_OPTION  *BootManagerMenu OPTIONAL
-  )
-{
-  UINTN  Index;
-
-  //
-  // Report Status Code to indicate BDS starts attempting booting from the UEFI BootOrder list.
-  //
-  REPORT_STATUS_CODE (EFI_PROGRESS_CODE, (EFI_SOFTWARE_DXE_BS_DRIVER | EFI_SW_DXE_BS_PC_ATTEMPT_BOOT_ORDER_EVENT));
-
-  //
-  // Attempt boot each boot option
-  //
-
-  for (Index = 0; Index < BootOptionCount; Index++) {
-    //
-    // According to EFI Specification, if a load option is not marked
-    // as LOAD_OPTION_ACTIVE, the boot manager will not automatically
-    // load the option.
-    //
-    if ((BootOptions[Index].Attributes & LOAD_OPTION_ACTIVE) == 0) {
-      continue;
-    }
-
-    //
-    // Boot#### load options with LOAD_OPTION_CATEGORY_APP are executables which are not
-    // part of the normal boot processing. Boot options with reserved category values will be
-    // ignored by the boot manager.
-    //
-    if ((BootOptions[Index].Attributes & LOAD_OPTION_CATEGORY) != LOAD_OPTION_CATEGORY_BOOT) {
-      continue;
-    }
-
-    //
-    // All the driver options should have been processed since
-    // now boot will be performed.
-    //
-    EfiBootManagerBoot (&BootOptions[Index]);
-
-    PlatformBootManagerProcessBootCompletion (&BootOptions[Index]);        // MSCHANGE 00076 - record boot status
-
-    // MU_CHANGE [BEGIN] - Support infinite boot retries
-    //  Changes for PcdSupportInfiniteBootRetries are meant to minimize upkeep in mu repos.
-    //   If/when upstreaming this change, refactoring calling loop in BdsEntry() would be
-    //   better location.
-    if (!PcdGetBool (PcdSupportInfiniteBootRetries)) {
-      // MU_CHANGE [END] - Support infinite boot retries
-
-      //
-      // If the boot via Boot#### returns with a status of EFI_SUCCESS, platform firmware
-      // supports boot manager menu, and if firmware is configured to boot in an
-      // interactive mode, the boot manager will stop processing the BootOrder variable and
-      // present a boot manager menu to the user.
-      //
-      if ((BootManagerMenu != NULL) && (BootOptions[Index].Status == EFI_SUCCESS)) {
-        EfiBootManagerBoot (BootManagerMenu);
-        break;
-      }
-
-      // MU_CHANGE [BEGIN]- Support infinite boot retries
-      //  Changes for PcdSupportInfiniteBootRetries are meant to minimize upkeep in mu repos.
-      //   If/when upstreaming this change, refactoring calling loop in BdsEntry() would be
-      //   better location.
-    }
-
-    // MU_CHANGE [END]- Support infinite boot retries
-  }
-
-  return (BOOLEAN)(Index < BootOptionCount);
 }
 
 /**
@@ -663,7 +547,6 @@ BdsEntry (
   UINTN                         DataSize;
   EFI_STATUS                    Status;
   UINT32                        BootOptionSupport;
-  UINT16                        BootTimeOut;
   EDKII_VARIABLE_LOCK_PROTOCOL  *VariableLock;
   UINTN                         Index;
   EFI_BOOT_MANAGER_LOAD_OPTION  LoadOption;
@@ -673,9 +556,9 @@ BdsEntry (
   BOOLEAN                       BootFwUi;
   BOOLEAN                       PlatformRecovery;
   BOOLEAN                       BootSuccess;
-  EFI_DEVICE_PATH_PROTOCOL      *FilePath;
   EFI_STATUS                    BootManagerMenuStatus;
-  EFI_BOOT_MANAGER_LOAD_OPTION  PlatformDefaultBootOption;
+  BDS_BOOT_STATE                BdsState;
+  EFI_BOOT_MANAGER_LOAD_OPTION  BootOption;
 
   Status          = EFI_SUCCESS;
   BootSuccess     = FALSE;
@@ -686,7 +569,7 @@ BdsEntry (
   PERF_CROSSMODULE_END ("DXE");
   PERF_CROSSMODULE_BEGIN ("BDS");
   DEBUG ((DEBUG_INFO, "[Bds] Entry...\n"));
-  PlatformBootManagerBdsEntry ();             // MSCHANGE 00076 - Signal start of BDS
+  DeviceBootManagerBdsEntry ();
 
   //
   // Fill in FirmwareVendor and FirmwareRevision from PCDs
@@ -720,24 +603,6 @@ BdsEntry (
   }
 
   InitializeHwErrRecSupport ();
-
-  //
-  // Initialize L"Timeout" EFI global variable.
-  //
-  BootTimeOut = PcdGet16 (PcdPlatformBootTimeOut);
-  if (BootTimeOut != 0xFFFF) {
-    //
-    // If time out value equal 0xFFFF, no need set to 0xFFFF to variable area because UEFI specification
-    // define same behavior between no value or 0xFFFF value for L"Timeout".
-    //
-    BdsDxeSetVariableAndReportStatusCodeOnError (
-      EFI_TIME_OUT_VARIABLE_NAME,
-      &gEfiGlobalVariableGuid,
-      EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS | EFI_VARIABLE_NON_VOLATILE,
-      sizeof (UINT16),
-      &BootTimeOut
-      );
-  }
 
   //
   // Initialize L"BootOptionSupport" EFI global variable.
@@ -901,211 +766,209 @@ BdsEntry (
   //
   BootManagerMenuStatus = EfiBootManagerGetBootManagerMenu (&BootManagerMenu);
 
-  BootFwUi         = (BOOLEAN)((OsIndication & EFI_OS_INDICATIONS_BOOT_TO_FW_UI) != 0);
-  PlatformRecovery = (BOOLEAN)((OsIndication & EFI_OS_INDICATIONS_START_PLATFORM_RECOVERY) != 0);
-  //
-  // Clear EFI_OS_INDICATIONS_BOOT_TO_FW_UI to acknowledge OS
-  //
-  if (BootFwUi || PlatformRecovery) {
-    OsIndication &= ~((UINT64)(EFI_OS_INDICATIONS_BOOT_TO_FW_UI | EFI_OS_INDICATIONS_START_PLATFORM_RECOVERY));
-    Status        = gRT->SetVariable (
-                           EFI_OS_INDICATIONS_VARIABLE_NAME,
-                           &gEfiGlobalVariableGuid,
-                           EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS | EFI_VARIABLE_NON_VOLATILE,
-                           sizeof (UINT64),
-                           &OsIndication
-                           );
-    //
-    // Changing the content without increasing its size with current variable implementation shouldn't fail.
-    //
-    ASSERT_EFI_ERROR (Status);
-  }
+  // Entering the BDS state machine...
+  BdsState = BdsCheckOsIndication;
+  while (TRUE) {
+    switch (BdsState) {
+      case BdsCheckOsIndication:
+        BootFwUi         = (BOOLEAN)((OsIndication & EFI_OS_INDICATIONS_BOOT_TO_FW_UI) != 0);
+        PlatformRecovery = (BOOLEAN)((OsIndication & EFI_OS_INDICATIONS_START_PLATFORM_RECOVERY) != 0);
 
-  //
-  // Launch Boot Manager Menu directly when EFI_OS_INDICATIONS_BOOT_TO_FW_UI is set.
-  //
-  if (BootFwUi && (BootManagerMenuStatus != EFI_NOT_FOUND)) {
-    //
-    // Follow generic rule, Call BdsDxeOnConnectConInCallBack to connect ConIn before enter UI
-    //
-    BdsDxeOnConnectConInCallBack (NULL, NULL);
-
-    //
-    // Directly enter the setup page.
-    //
-    EfiBootManagerBoot (&BootManagerMenu);
-  }
-
-  if (!PlatformRecovery) {
-    //
-    // Execute SysPrep####
-    //
-    LoadOptions = EfiBootManagerGetLoadOptions (&LoadOptionCount, LoadOptionTypeSysPrep);
-    if ((LoadOptionCount != 0) && (LoadOptions != NULL)) {
-      ProcessLoadOptions (LoadOptions, LoadOptionCount);
-      EfiBootManagerFreeLoadOptions (LoadOptions, LoadOptionCount);
-    }
-
-    PlatformBootManagerPriorityBoot (&BootNext);          // MSCHANGE 00076  Check for hard button boot selection
-
-    if (BootNext != NULL) {
-      //
-      // Delete "BootNext" NV variable before transferring control to it to prevent loops.
-      //
-      Status = gRT->SetVariable (
-                      EFI_BOOT_NEXT_VARIABLE_NAME,
-                      &gEfiGlobalVariableGuid,
-                      0,
-                      0,
-                      NULL
-                      );
-      //
-      // Deleting NV variable shouldn't fail unless it doesn't exist.
-      //
-      ASSERT (Status == EFI_SUCCESS || Status == EFI_NOT_FOUND);
-
-      //
-      // Boot to "BootNext"
-      //
-      UnicodeSPrint (BootNextVariableName, sizeof (BootNextVariableName), L"Boot%04x", *BootNext);
-      Status = EfiBootManagerVariableToLoadOption (BootNextVariableName, &LoadOption);
-      if (!EFI_ERROR (Status)) {
-        EfiBootManagerBoot (&LoadOption);
-        PlatformBootManagerProcessBootCompletion (&LoadOption);        // MSCHANGE 00076 - record boot status
-        EfiBootManagerFreeLoadOption (&LoadOption);
-        if ((LoadOption.Status == EFI_SUCCESS) &&
-            (BootManagerMenuStatus != EFI_NOT_FOUND) &&
-            (LoadOption.OptionNumber != BootManagerMenu.OptionNumber))
-        {
+        //
+        // Clear EFI_OS_INDICATIONS_BOOT_TO_FW_UI to acknowledge OS
+        //
+        if (BootFwUi || PlatformRecovery) {
+          OsIndication &= ~((UINT64)(EFI_OS_INDICATIONS_BOOT_TO_FW_UI | EFI_OS_INDICATIONS_START_PLATFORM_RECOVERY));
+          Status        = gRT->SetVariable (
+                                EFI_OS_INDICATIONS_VARIABLE_NAME,
+                                &gEfiGlobalVariableGuid,
+                                EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS | EFI_VARIABLE_NON_VOLATILE,
+                                sizeof (UINT64),
+                                &OsIndication
+                                );
           //
-          // Boot to Boot Manager Menu upon EFI_SUCCESS
-          // Exception: Do not boot again when the BootNext points to Boot Manager Menu.
+          // Changing the content without increasing its size with current variable implementation shouldn't fail.
+          //
+          ASSERT_EFI_ERROR (Status);
+        }
+
+        if (BootFwUi) {
+          //
+          // Follow generic rule, Call BdsDxeOnConnectConInCallBack to connect ConIn before enter UI
+          //
+          BdsDxeOnConnectConInCallBack (NULL, NULL);
+
+          BdsState = BdsBootMenu;
+        } else if (PlatformRecovery) {
+          BdsState = BdsBootCannotBoot;
+        } else {
+          BdsState = BdsPriorityBoot;
+        }
+        break;
+      case BdsPriorityBoot:
+        //
+        // Execute SysPrep####
+        //
+        LoadOptions = EfiBootManagerGetLoadOptions (&LoadOptionCount, LoadOptionTypeSysPrep);
+        if ((LoadOptionCount != 0) && (LoadOptions != NULL)) {
+          ProcessLoadOptions (LoadOptions, LoadOptionCount);
+          EfiBootManagerFreeLoadOptions (LoadOptions, LoadOptionCount);
+        }
+
+        Status = DeviceBootManagerPriorityBoot (&BootOption);
+
+        //
+        // Exit if nothing to process
+        //
+        if (EFI_NOT_FOUND == Status) {
+          DEBUG ((DEBUG_INFO, "No Priority Boot option selected.\n"));
+        } else if (EFI_ERROR (Status)) {
+          DEBUG ((DEBUG_ERROR, "[Bds] Other errors detected, and unable to boot. Code=%r\n", Status));
+        } else {
+          // Attempt the priority boot option.
+          EfiBootManagerBoot (&BootOption);
+          Status = BootOption.Status;
+          EfiBootManagerFreeLoadOption (&BootOption);
+
+          //
+          // If the priority boot option returns with a status of EFI_SUCCESS, and platform firmware supports boot manager
+          // menu the boot manager will stop processing boot options here and present a boot manager menu to the user.
+          //
+          if (Status == EFI_SUCCESS) {
+            BdsState = BdsBootMenu;
+            break;
+          }
+        }
+
+        // Otherwise, we process the boot next
+        BdsState = BdsBootNext;
+        break;
+      case BdsBootNext:
+        //
+        // Delete "BootNext" NV variable before transferring control to it to prevent loops.
+        //
+        Status = gRT->SetVariable (
+                        EFI_BOOT_NEXT_VARIABLE_NAME,
+                        &gEfiGlobalVariableGuid,
+                        0,
+                        0,
+                        NULL
+                        );
+        //
+        // Deleting NV variable shouldn't fail unless it doesn't exist.
+        //
+        ASSERT (Status == EFI_SUCCESS || Status == EFI_NOT_FOUND);
+
+        //
+        // Boot to "BootNext"
+        //
+        UnicodeSPrint (BootNextVariableName, sizeof (BootNextVariableName), L"Boot%04x", *BootNext);
+        Status = EfiBootManagerVariableToLoadOption (BootNextVariableName, &LoadOption);
+        if (!EFI_ERROR (Status)) {
+          EfiBootManagerBoot (&LoadOption);
+          DeviceBootManagerProcessBootCompletion (&LoadOption);        // MSCHANGE 00076 - record boot status
+          EfiBootManagerFreeLoadOption (&LoadOption);
+          if ((LoadOption.Status == EFI_SUCCESS) &&
+              (BootManagerMenuStatus != EFI_NOT_FOUND) &&
+              (LoadOption.OptionNumber != BootManagerMenu.OptionNumber))
+          {
+            //
+            // Boot to Boot Manager Menu upon EFI_SUCCESS
+            // Exception: Do not boot again when the BootNext points to Boot Manager Menu.
+            //
+            BdsState = BdsBootMenu;
+          }
+        }
+        break;
+      case BdsBootNormalPrepare:
+        LoadOptions = EfiBootManagerGetLoadOptions (&LoadOptionCount, LoadOptionTypeBoot);
+        if ((LoadOptionCount != 0) && (LoadOptions != NULL)) {
+          BdsState = BdsBootNormal;
+        } else if (!PcdGetBool (PcdSupportInfiniteBootRetries)) {
+          BdsState = BdsBootCannotBoot;
+        } else {
+          // Just stay in this state...?
+        }
+        break;
+      case BdsBootNormal:
+        REPORT_STATUS_CODE (EFI_PROGRESS_CODE, (EFI_SOFTWARE_DXE_BS_DRIVER | EFI_SW_DXE_BS_PC_ATTEMPT_BOOT_ORDER_EVENT));
+
+        //
+        // According to EFI Specification, if a load option is not marked
+        // as LOAD_OPTION_ACTIVE, the boot manager will not automatically
+        // load the option.
+        //
+        if ((LoadOptions[Index].Attributes & LOAD_OPTION_ACTIVE) == 0) {
+          // Do nothing
+        }
+
+        //
+        // Boot#### load options with LOAD_OPTION_CATEGORY_APP are executables which are not
+        // part of the normal boot processing. Boot options with reserved category values will be
+        // ignored by the boot manager.
+        //
+        else if ((LoadOptions[Index].Attributes & LOAD_OPTION_CATEGORY) != LOAD_OPTION_CATEGORY_BOOT) {
+          // Do nothing
+        }
+
+        //
+        // All the driver options should have been processed since
+        // now boot will be performed.
+        //
+        else {
+          EfiBootManagerBoot (&LoadOptions[Index]);
+
+          DeviceBootManagerProcessBootCompletion (&LoadOptions[Index]);
+
+          // MU_CHANGE [BEGIN] - Support infinite boot retries
+          //  Changes for PcdSupportInfiniteBootRetries are meant to minimize upkeep in mu repos.
+          //   If/when upstreaming this change, refactoring calling loop in BdsEntry() would be
+          //   better location.
+          if (!PcdGetBool (PcdSupportInfiniteBootRetries) && (LoadOptions[Index].Status == EFI_SUCCESS)) {
+            BdsState = BdsBootMenu;
+            break;
+          }
+        }
+
+        // Normal break out, increment the index and let the state machine handle the transition.
+        Index ++;
+        if (Index >= LoadOptionCount) {
+          BdsState = BdsNormalEnd;
+        } else {
+          // Keep looping the reset of the boot options
+        }
+        break;
+      case BdsNormalEnd:
+          EfiBootManagerFreeLoadOptions (LoadOptions, LoadOptionCount);
+          if (PcdGetBool (PcdSupportInfiniteBootRetries)) {
+            BdsState = BdsBootNormalPrepare;
+          }
+          break;
+      case BdsBootMenu:
+        if (BootManagerMenuStatus != EFI_NOT_FOUND) {
+
+          //
+          // Directly enter the setup page.
           //
           EfiBootManagerBoot (&BootManagerMenu);
         }
-      }
-    }
 
-    do {
-      //
-      // Retry to boot if any of the boot succeeds
-      //
-      LoadOptions = EfiBootManagerGetLoadOptions (&LoadOptionCount, LoadOptionTypeBoot);
-      if ((LoadOptionCount != 0) && (LoadOptions != NULL)) {
-        BootSuccess = BootBootOptions (LoadOptions, LoadOptionCount, (BootManagerMenuStatus != EFI_NOT_FOUND) ? &BootManagerMenu : NULL);
-        EfiBootManagerFreeLoadOptions (LoadOptions, LoadOptionCount);
-      }
-    } while (BootSuccess || PcdGetBool (PcdSupportInfiniteBootRetries)); // MU_CHANGE add PcdSupportInfiniteBootRetries support
-  }
+        // If we ever get here, we failed to boot. Just let that case handle the error.
+        BdsState = BdsBootCannotBoot;
+        break;
+      case BdsBootCannotBoot:
+        // Fall through
+      default:
+        if (BootManagerMenuStatus != EFI_NOT_FOUND) {
+          EfiBootManagerFreeLoadOption (&BootManagerMenu);
+        }
 
-  if (BootManagerMenuStatus != EFI_NOT_FOUND) {
-    EfiBootManagerFreeLoadOption (&BootManagerMenu);
-  }
+        DEBUG ((DEBUG_ERROR, "[Bds] Unable to boot!\n"));
+        DeviceBootManagerUnableToBoot ();
 
-  if (!BootSuccess) {
-    if (PcdGetBool (PcdPlatformRecoverySupport)) {
-      LoadOptions = EfiBootManagerGetLoadOptions (&LoadOptionCount, LoadOptionTypePlatformRecovery);
-      if ((LoadOptionCount != 0) && (LoadOptions != NULL)) {
-        ProcessLoadOptions (LoadOptions, LoadOptionCount);
-        EfiBootManagerFreeLoadOptions (LoadOptions, LoadOptionCount);
-        //    } else {
-        //
-        // MU_CHANGE TCBZ2523 - Bds should NEVER boot anything the platform has not specified.
-        //
-        //      //
-        //      // When platform recovery is not enabled, still boot to platform default file path.
-        //      //
-        //      EfiBootManagerProcessLoadOption (&PlatformDefaultBootOption);
-      }
+        CpuDeadLoop ();
     }
   }
 
-  EfiBootManagerFreeLoadOption (&PlatformDefaultBootOption);
-
-  DEBUG ((DEBUG_ERROR, "[Bds] Unable to boot!\n"));
-  PlatformBootManagerUnableToBoot ();
-
-  CpuDeadLoop ();
-}
-
-/**
-  Set the variable and report the error through status code upon failure.
-
-  @param  VariableName           A Null-terminated string that is the name of the vendor's variable.
-                                 Each VariableName is unique for each VendorGuid. VariableName must
-                                 contain 1 or more characters. If VariableName is an empty string,
-                                 then EFI_INVALID_PARAMETER is returned.
-  @param  VendorGuid             A unique identifier for the vendor.
-  @param  Attributes             Attributes bitmask to set for the variable.
-  @param  DataSize               The size in bytes of the Data buffer. Unless the EFI_VARIABLE_APPEND_WRITE,
-                                 or EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACCESS attribute is set, a size of zero
-                                 causes the variable to be deleted. When the EFI_VARIABLE_APPEND_WRITE attribute is
-                                 set, then a SetVariable() call with a DataSize of zero will not cause any change to
-                                 the variable value (the timestamp associated with the variable may be updated however
-                                 even if no new data value is provided,see the description of the
-                                 EFI_VARIABLE_AUTHENTICATION_2 descriptor below. In this case the DataSize will not
-                                 be zero since the EFI_VARIABLE_AUTHENTICATION_2 descriptor will be populated).
-  @param  Data                   The contents for the variable.
-
-  @retval EFI_SUCCESS            The firmware has successfully stored the variable and its data as
-                                 defined by the Attributes.
-  @retval EFI_INVALID_PARAMETER  An invalid combination of attribute bits, name, and GUID was supplied, or the
-                                 DataSize exceeds the maximum allowed.
-  @retval EFI_INVALID_PARAMETER  VariableName is an empty string.
-  @retval EFI_OUT_OF_RESOURCES   Not enough storage is available to hold the variable and its data.
-  @retval EFI_DEVICE_ERROR       The variable could not be retrieved due to a hardware error.
-  @retval EFI_WRITE_PROTECTED    The variable in question is read-only.
-  @retval EFI_WRITE_PROTECTED    The variable in question cannot be deleted.
-  @retval EFI_SECURITY_VIOLATION The variable could not be written due to EFI_VARIABLE_TIME_BASED_AUTHENTICATED_WRITE_ACESS
-                                 being set, but the AuthInfo does NOT pass the validation check carried out by the firmware.
-
-  @retval EFI_NOT_FOUND          The variable trying to be updated or deleted was not found.
-**/
-EFI_STATUS
-BdsDxeSetVariableAndReportStatusCodeOnError (
-  IN CHAR16    *VariableName,
-  IN EFI_GUID  *VendorGuid,
-  IN UINT32    Attributes,
-  IN UINTN     DataSize,
-  IN VOID      *Data
-  )
-{
-  EFI_STATUS                 Status;
-  EDKII_SET_VARIABLE_STATUS  *SetVariableStatus;
-  UINTN                      NameSize;
-
-  Status = gRT->SetVariable (
-                  VariableName,
-                  VendorGuid,
-                  Attributes,
-                  DataSize,
-                  Data
-                  );
-  if (EFI_ERROR (Status)) {
-    NameSize          = StrSize (VariableName);
-    SetVariableStatus = AllocatePool (sizeof (EDKII_SET_VARIABLE_STATUS) + NameSize + DataSize);
-    if (SetVariableStatus != NULL) {
-      CopyGuid (&SetVariableStatus->Guid, VendorGuid);
-      SetVariableStatus->NameSize   = NameSize;
-      SetVariableStatus->DataSize   = DataSize;
-      SetVariableStatus->SetStatus  = Status;
-      SetVariableStatus->Attributes = Attributes;
-      CopyMem (SetVariableStatus + 1, VariableName, NameSize);
-      CopyMem (((UINT8 *)(SetVariableStatus + 1)) + NameSize, Data, DataSize);
-
-      REPORT_STATUS_CODE_EX (
-        EFI_ERROR_CODE,
-        PcdGet32 (PcdErrorCodeSetVariable),
-        0,
-        NULL,
-        &gEdkiiStatusCodeDataTypeVariableGuid,
-        SetVariableStatus,
-        sizeof (EDKII_SET_VARIABLE_STATUS) + NameSize + DataSize
-        );
-
-      FreePool (SetVariableStatus);
-    }
-  }
-
-  return Status;
+  // Never get here
 }

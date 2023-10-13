@@ -461,15 +461,49 @@ PlatformBootManagerAfterConsole (
 }
 
 /**
-  This function is called each second during the boot manager waits the timeout.
-
-  @param TimeoutRemain  The remaining timeout.
-**/
+  OnDemandConInConnect
+ */
 VOID
 EFIAPI
-PlatformBootManagerWaitCallback (
-  UINT16  TimeoutRemain
+PlatformBootManagerOnDemandConInConnect (
+  VOID
   )
 {
+  EFI_HANDLE                DeviceHandle;
+  EFI_HANDLE                *HandleBuffer;
+  UINTN                     HandleCount;
+  UINTN                     Index;
+  EFI_DEVICE_PATH_PROTOCOL  **PlatformConnectDeviceList;
+  CHAR16                    *TmpStr;
+
+  PlatformConnectDeviceList = DeviceBootManagerOnDemandConInConnect ();
+  DEBUG ((DEBUG_INFO, "Connect List = %p\n", PlatformConnectDeviceList));
+  if (PlatformConnectDeviceList != NULL) {
+    while (*PlatformConnectDeviceList != NULL) {
+      TmpStr = ConvertDevicePathToText (*PlatformConnectDeviceList, FALSE, FALSE);
+      DEBUG ((DEBUG_INFO, "Connecting %s\n", TmpStr));
+      if (TmpStr != NULL) {
+        FreePool (TmpStr);
+      }
+
+      EfiBootManagerConnectDevicePath (*PlatformConnectDeviceList, &DeviceHandle);
+      PlatformConnectDeviceList++;
+    }
+  }
+
+  gBS->LocateHandleBuffer (
+         ByProtocol,
+         &gEfiAbsolutePointerProtocolGuid,
+         NULL,
+         &HandleCount,
+         &HandleBuffer
+         );
+  DEBUG ((DEBUG_INFO, "AbsPtr handle count = %d\n", HandleCount));
+
+  for (Index = 0; Index < HandleCount; Index++) {
+    DEBUG ((DEBUG_INFO, "Connecting AbsPtr = %p\n", HandleBuffer[Index]));
+    gBS->ConnectController (HandleBuffer[Index], NULL, NULL, TRUE);
+  }
+
   return;
 }

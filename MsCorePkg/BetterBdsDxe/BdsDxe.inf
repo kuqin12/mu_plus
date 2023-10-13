@@ -30,6 +30,7 @@
 [Packages]
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
+  MsCorePkg/MsCorePkg.dec
 
 [LibraryClasses]
   DevicePathLib
@@ -44,6 +45,7 @@
   DebugLib
   UefiBootManagerLib
   PlatformBootManagerLib
+  DeviceBootManagerLib
   PcdLib
   PrintLib
 
