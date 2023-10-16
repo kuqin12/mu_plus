@@ -39,7 +39,6 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <Library/PrintLib.h>
 
 #include <Library/UefiBootManagerLib.h>
-#include <Library/PlatformBootManagerLib.h>
 #include <Library/DeviceBootManagerLib.h>
 
 #define SET_BOOT_OPTION_SUPPORT_KEY_COUNT(a, c)  { \
@@ -117,10 +116,43 @@ BdsDxeOnConnectConInCallBack (
   IN VOID       *Context
   )
 {
-  EFI_STATUS  Status;
+  EFI_STATUS                Status;
+  EFI_HANDLE                DeviceHandle;
+  EFI_HANDLE                *HandleBuffer;
+  UINTN                     HandleCount;
+  UINTN                     Index;
+  EFI_DEVICE_PATH_PROTOCOL  **PlatformConnectDeviceList;
+  CHAR16                    *TmpStr;
 
   // Inform platform of duties to perform before connecting consoles.   // MSCHANGE
-  PlatformBootManagerOnDemandConInConnect ();                           // MSCHANGE
+  PlatformConnectDeviceList = DeviceBootManagerOnDemandConInConnect ();
+  DEBUG ((DEBUG_INFO, "Connect List = %p\n", PlatformConnectDeviceList));
+  if (PlatformConnectDeviceList != NULL) {
+    while (*PlatformConnectDeviceList != NULL) {
+      TmpStr = ConvertDevicePathToText (*PlatformConnectDeviceList, FALSE, FALSE);
+      DEBUG ((DEBUG_INFO, "Connecting %s\n", TmpStr));
+      if (TmpStr != NULL) {
+        FreePool (TmpStr);
+      }
+
+      EfiBootManagerConnectDevicePath (*PlatformConnectDeviceList, &DeviceHandle);
+      PlatformConnectDeviceList++;
+    }
+  }
+
+  gBS->LocateHandleBuffer (
+         ByProtocol,
+         &gEfiAbsolutePointerProtocolGuid,
+         NULL,
+         &HandleCount,
+         &HandleBuffer
+         );
+  DEBUG ((DEBUG_INFO, "AbsPtr handle count = %d\n", HandleCount));
+
+  for (Index = 0; Index < HandleCount; Index++) {
+    DEBUG ((DEBUG_INFO, "Connecting AbsPtr = %p\n", HandleBuffer[Index]));
+    gBS->ConnectController (HandleBuffer[Index], NULL, NULL, TRUE);
+  }
 
   //
   // When Osloader call ReadKeyStroke to signal this event
@@ -410,10 +442,6 @@ BdsFormalizeOSIndicationVariable (
     OsIndicationSupport = 0;
   }
 
-  if (PcdGetBool (PcdPlatformRecoverySupport)) {
-    OsIndicationSupport |= EFI_OS_INDICATIONS_START_PLATFORM_RECOVERY;
-  }
-
   if (PcdGetBool (PcdCapsuleOnDiskSupport)) {
     OsIndicationSupport |= EFI_OS_INDICATIONS_FILE_CAPSULE_DELIVERY_SUPPORTED;
   }
@@ -524,6 +552,121 @@ InitializeHwErrRecSupport (
                     );
     ASSERT_EFI_ERROR (Status);
   }
+}
+
+/**
+  The function will execute with as the platform policy, current policy
+  is driven by boot mode. IBV/OEM can customize this code for their specific
+  policy action.
+
+  @param DriverOptionList - The header of the driver option link list
+  @param BootOptionList   - The header of the boot option link list
+  @param ProcessCapsules  - A pointer to ProcessCapsules()
+  @param BaseMemoryTest   - A pointer to BaseMemoryTest()
+**/
+VOID
+EFIAPI
+PlatformBootManagerAfterConsole (
+  VOID
+  )
+{
+  EFI_STATUS  Status;
+  UINT32      Attributes;
+  UINTN       VariableSize = 0;
+
+  //  EFI_INPUT_KEY                 Key;
+
+  if (PcdGetBool (PcdTestKeyUsed) == TRUE) {
+    Print (L"WARNING: Capsule Test Key is used.\n");
+    DEBUG ((DEBUG_INFO, "WARNING: Capsule Test Key is used.\n"));
+  }
+
+  mPlatformConnectSequence = DeviceBootManagerAfterConsole ();
+
+  //
+  // Boot Mode obtained in BeforeConsole action.
+  //
+  DEBUG ((DEBUG_INFO, "BootMode 0x%x\n", mBootMode));
+
+  //
+  // Go the different platform policy with different boot mode
+  // Notes: this part code can be change with the table policy
+  //
+  switch (mBootMode) {
+    case BOOT_ON_FLASH_UPDATE:
+      EfiBootManagerConnectAll ();
+      DEBUG ((DEBUG_INFO, "[%a] - signalling capsules are ready for processing\n", __FUNCTION__));
+      DEBUG ((DEBUG_INFO, "[%a] - Deleting Memory Type Information variable for capsule update\n", __FUNCTION__));
+      Status = gRT->GetVariable (
+                      EFI_MEMORY_TYPE_INFORMATION_VARIABLE_NAME,
+                      &gEfiMemoryTypeInformationGuid,
+                      &Attributes,
+                      &VariableSize,
+                      NULL
+                      );
+      if (Status == EFI_BUFFER_TOO_SMALL) {
+        Status = gRT->SetVariable (
+                        EFI_MEMORY_TYPE_INFORMATION_VARIABLE_NAME,
+                        &gEfiMemoryTypeInformationGuid,
+                        Attributes,
+                        0,
+                        NULL
+                        );
+        ASSERT_EFI_ERROR (Status);
+      }
+
+      EfiEventGroupSignal (&gMuReadyToProcessCapsulesNotifyGuid);
+      Status = ProcessCapsules ();
+
+      // If capsule update require reboot
+      // this function will not return.
+      if (EFI_ERROR (Status)) {
+        SetMorControl ();
+        DEBUG ((DEBUG_INFO, "Locate and Process Capsules returned error (Status=%r). Setting MOR to clear memory and initiating reset.\n", Status));
+      }
+
+      // If we get here we need to reboot as we never want to boot in Flash Update mode.
+      gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, 0, NULL);
+      break;
+
+    case BOOT_IN_RECOVERY_MODE:
+      DEBUG ((DEBUG_ERROR, "THIS BOOT MODE IS UNSUPPORTED.  0x%X \n", mBootMode));
+
+      //
+      // In recovery boot mode, we still enter to the
+      // front page now
+      //
+
+      break;
+
+    case BOOT_WITH_FULL_CONFIGURATION:
+    case BOOT_WITH_FULL_CONFIGURATION_PLUS_DIAGNOSTICS:
+    case BOOT_ON_S4_RESUME:
+    case BOOT_WITH_MINIMAL_CONFIGURATION:
+      DEBUG ((DEBUG_ERROR, "THIS BOOT MODE IS UNSUPPORTED.  0x%X \n", mBootMode));
+
+    case BOOT_ASSUMING_NO_CONFIGURATION_CHANGES:
+    case BOOT_WITH_DEFAULT_SETTINGS:
+    default:
+      // run memory test here to mark all memory good.  This is a hack until we get real BDS.
+      Status = MemoryTest (QUICK);  // we use NULL memory test so level doesn't matter.
+      //
+      // Perform some platform specific connect sequence
+      //
+      // PERF_START_EX(NULL,"EventRec", NULL, AsmReadTsc(), 0x7050); // MS_CHANGE
+      ConnectSequence ();
+      // PERF_END_EX(NULL,"EventRec", NULL, AsmReadTsc(), 0x7051); // MS_CHANGE
+
+      break;
+  }
+
+  //
+  // For all cases, we need to call ProcessCapsules in order to clear
+  // the capsule variables. The BOOT_ON_FLASH_UPDATE case above calls this
+  // routine but the system is always reset in that case before reaching this
+  // point.
+  //
+  (void)ProcessCapsules ();
 }
 
 /**
