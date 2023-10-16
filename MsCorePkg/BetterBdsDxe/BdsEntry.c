@@ -844,6 +844,11 @@ BdsEntry (
         BdsState = BdsBootNext;
         break;
       case BdsBootNext:
+        if (BootNext == NULL) {
+          BdsState = BdsBootNormalPrepare;
+          break;
+        }
+
         //
         // Delete "BootNext" NV variable before transferring control to it to prevent loops.
         //
@@ -884,6 +889,7 @@ BdsEntry (
         LoadOptions = EfiBootManagerGetLoadOptions (&LoadOptionCount, LoadOptionTypeBoot);
         if ((LoadOptionCount != 0) && (LoadOptions != NULL)) {
           BdsState = BdsBootNormal;
+          Index    = 0;
         } else if (!PcdGetBool (PcdSupportInfiniteBootRetries)) {
           BdsState = BdsBootCannotBoot;
         } else {
