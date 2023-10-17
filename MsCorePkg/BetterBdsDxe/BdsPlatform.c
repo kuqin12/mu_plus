@@ -6,10 +6,63 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 
 **/
 
-#include "BdsPlatform.h"
+#include <PiDxe.h>
 
-static EFI_BOOT_MODE                 mBootMode;
-static EFI_DEVICE_PATH_PROTOCOL      **mPlatformConnectSequence;
+#include <Protocol/DevicePath.h>
+#include <Protocol/SimpleNetwork.h>
+#include <Protocol/PciRootBridgeIo.h>
+#include <Protocol/LoadFile.h>
+
+#include <Protocol/LoadedImage.h>
+#include <Protocol/GenericMemoryTest.h>
+#include <Protocol/DxeSmmReadyToLock.h>
+
+#include <Guid/CapsuleVendor.h>
+
+#include <Guid/MemoryTypeInformation.h>
+#include <Guid/EventGroup.h>
+#include <Guid/GlobalVariable.h>
+#include <Guid/MemoryOverwriteControl.h>
+
+#include <Library/DebugLib.h>
+#include <Library/BaseMemoryLib.h>
+#include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiRuntimeServicesTableLib.h>
+#include <Library/MemoryAllocationLib.h>
+#include <Library/BaseLib.h>
+#include <Library/PcdLib.h>
+#include <Library/PlatformBootManagerLib.h>
+#include <Library/DevicePathLib.h>
+#include <Library/UefiLib.h>
+#include <Library/DxeServicesTableLib.h>
+#include <Library/PrintLib.h>
+#include <Library/CapsuleLib.h>
+#include <Library/DeviceBootManagerLib.h>
+#include <Library/HobLib.h>
+#include <Library/PerformanceLib.h>
+
+#include <IndustryStandard/Pci30.h>
+
+//
+// Below is the boot option device path
+//
+
+#define CLASS_HID          3
+#define SUBCLASS_BOOT      1
+#define PROTOCOL_KEYBOARD  1
+
+#define gEndEntire \
+  { \
+    END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE, { END_DEVICE_PATH_LENGTH, 0 } \
+  }
+
+typedef struct {
+  USB_CLASS_DEVICE_PATH       UsbClass;
+  EFI_DEVICE_PATH_PROTOCOL    End;
+} USB_CLASS_FORMAT_DEVICE_PATH;
+
+EFI_BOOT_MODE                 mBootMode;
+EFI_DEVICE_PATH_PROTOCOL      **mPlatformConnectSequence;
 static USB_CLASS_FORMAT_DEVICE_PATH  mUsbClassKeyboardDevicePath = {
   {
     {
@@ -330,4 +383,192 @@ SetMorControl (
                   );
 
   return Status;
+}
+
+/**
+  Perform the memory test base on the memory test intensive level,
+  and update the memory resource.
+
+  @param  Level         The memory test intensive level.
+
+  @retval EFI_STATUS    Success test all the system memory and update
+                        the memory resource
+
+**/
+EFI_STATUS
+MemoryTest (
+  IN EXTENDMEM_COVERAGE_LEVEL  Level
+  )
+{
+  EFI_STATUS                        Status;
+  BOOLEAN                           RequireSoftECCInit;
+  EFI_GENERIC_MEMORY_TEST_PROTOCOL  *GenMemoryTest;
+  UINT64                            TestedMemorySize;
+  UINT64                            TotalMemorySize;
+  BOOLEAN                           ErrorOut;
+  BOOLEAN                           TestAbort;
+
+  TestedMemorySize = 0;
+  TotalMemorySize  = 0;
+  ErrorOut         = FALSE;
+  TestAbort        = FALSE;
+
+  RequireSoftECCInit = FALSE;
+
+  Status = gBS->LocateProtocol (
+                  &gEfiGenericMemTestProtocolGuid,
+                  NULL,
+                  (VOID **)&GenMemoryTest
+                  );
+  if (EFI_ERROR (Status)) {
+    return EFI_SUCCESS;
+  }
+
+  Status = GenMemoryTest->MemoryTestInit (
+                            GenMemoryTest,
+                            Level,
+                            &RequireSoftECCInit
+                            );
+  if (Status == EFI_NO_MEDIA) {
+    //
+    // The PEI codes also have the relevant memory test code to check the memory,
+    // it can select to test some range of the memory or all of them. If PEI code
+    // checks all the memory, this BDS memory test will has no not-test memory to
+    // do the test, and then the status of EFI_NO_MEDIA will be returned by
+    // "MemoryTestInit". So it does not need to test memory again, just return.
+    //
+    return EFI_SUCCESS;
+  }
+
+  do {
+    Status = GenMemoryTest->PerformMemoryTest (
+                              GenMemoryTest,
+                              &TestedMemorySize,
+                              &TotalMemorySize,
+                              &ErrorOut,
+                              TestAbort
+                              );
+    if (ErrorOut && (Status == EFI_DEVICE_ERROR)) {
+      ASSERT (0);
+    }
+  } while (Status != EFI_NOT_FOUND);
+
+  Status = GenMemoryTest->Finished (GenMemoryTest);
+
+  return EFI_SUCCESS;
+}
+
+/**
+  The function will execute with as the platform policy, current policy
+  is driven by boot mode. IBV/OEM can customize this code for their specific
+  policy action.
+
+  @param DriverOptionList - The header of the driver option link list
+  @param BootOptionList   - The header of the boot option link list
+  @param ProcessCapsules  - A pointer to ProcessCapsules()
+  @param BaseMemoryTest   - A pointer to BaseMemoryTest()
+**/
+VOID
+EFIAPI
+PlatformBootManagerAfterConsole (
+  VOID
+  )
+{
+  EFI_STATUS  Status;
+  UINT32      Attributes;
+  UINTN       VariableSize = 0;
+
+  //  EFI_INPUT_KEY                 Key;
+
+  if (PcdGetBool (PcdTestKeyUsed) == TRUE) {
+    Print (L"WARNING: Capsule Test Key is used.\n");
+    DEBUG ((DEBUG_INFO, "WARNING: Capsule Test Key is used.\n"));
+  }
+
+  mPlatformConnectSequence = DeviceBootManagerAfterConsole ();
+
+  //
+  // Boot Mode obtained in BeforeConsole action.
+  //
+  DEBUG ((DEBUG_INFO, "BootMode 0x%x\n", mBootMode));
+
+  //
+  // Go the different platform policy with different boot mode
+  // Notes: this part code can be change with the table policy
+  //
+  switch (mBootMode) {
+    case BOOT_ON_FLASH_UPDATE:
+      EfiBootManagerConnectAll ();
+      DEBUG ((DEBUG_INFO, "[%a] - signalling capsules are ready for processing\n", __FUNCTION__));
+      DEBUG ((DEBUG_INFO, "[%a] - Deleting Memory Type Information variable for capsule update\n", __FUNCTION__));
+      Status = gRT->GetVariable (
+                      EFI_MEMORY_TYPE_INFORMATION_VARIABLE_NAME,
+                      &gEfiMemoryTypeInformationGuid,
+                      &Attributes,
+                      &VariableSize,
+                      NULL
+                      );
+      if (Status == EFI_BUFFER_TOO_SMALL) {
+        Status = gRT->SetVariable (
+                        EFI_MEMORY_TYPE_INFORMATION_VARIABLE_NAME,
+                        &gEfiMemoryTypeInformationGuid,
+                        Attributes,
+                        0,
+                        NULL
+                        );
+        ASSERT_EFI_ERROR (Status);
+      }
+
+      EfiEventGroupSignal (&gMuReadyToProcessCapsulesNotifyGuid);
+      Status = ProcessCapsules ();
+
+      // If capsule update require reboot
+      // this function will not return.
+      if (EFI_ERROR (Status)) {
+        SetMorControl ();
+        DEBUG ((DEBUG_INFO, "Locate and Process Capsules returned error (Status=%r). Setting MOR to clear memory and initiating reset.\n", Status));
+      }
+
+      // If we get here we need to reboot as we never want to boot in Flash Update mode.
+      gRT->ResetSystem (EfiResetCold, EFI_SUCCESS, 0, NULL);
+      break;
+
+    case BOOT_IN_RECOVERY_MODE:
+      DEBUG ((DEBUG_ERROR, "THIS BOOT MODE IS UNSUPPORTED.  0x%X \n", mBootMode));
+
+      //
+      // In recovery boot mode, we still enter to the
+      // front page now
+      //
+
+      break;
+
+    case BOOT_WITH_FULL_CONFIGURATION:
+    case BOOT_WITH_FULL_CONFIGURATION_PLUS_DIAGNOSTICS:
+    case BOOT_ON_S4_RESUME:
+    case BOOT_WITH_MINIMAL_CONFIGURATION:
+      DEBUG ((DEBUG_ERROR, "THIS BOOT MODE IS UNSUPPORTED.  0x%X \n", mBootMode));
+
+    case BOOT_ASSUMING_NO_CONFIGURATION_CHANGES:
+    case BOOT_WITH_DEFAULT_SETTINGS:
+    default:
+      // run memory test here to mark all memory good.  This is a hack until we get real BDS.
+      Status = MemoryTest (QUICK);  // we use NULL memory test so level doesn't matter.
+      //
+      // Perform some platform specific connect sequence
+      //
+      // PERF_START_EX(NULL,"EventRec", NULL, AsmReadTsc(), 0x7050); // MS_CHANGE
+      ConnectSequence ();
+      // PERF_END_EX(NULL,"EventRec", NULL, AsmReadTsc(), 0x7051); // MS_CHANGE
+
+      break;
+  }
+
+  //
+  // For all cases, we need to call ProcessCapsules in order to clear
+  // the capsule variables. The BOOT_ON_FLASH_UPDATE case above calls this
+  // routine but the system is always reset in that case before reaching this
+  // point.
+  //
+  (void)ProcessCapsules ();
 }

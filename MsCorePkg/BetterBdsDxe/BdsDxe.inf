@@ -26,6 +26,8 @@
 
 [Sources]
   BdsEntry.c
+  BdsPlatform.c
+  BdsPlatform.h
 
 [Packages]
   MdePkg/MdePkg.dec
@@ -47,6 +49,7 @@
   DeviceBootManagerLib
   PcdLib
   PrintLib
+  CapsuleLib
 
 [Guids]
   gEfiGlobalVariableGuid                        ## SOMETIMES_PRODUCES ## Variable:L"BootNext" (The number of next boot option)
@@ -62,12 +65,18 @@
   gConnectConInEventGuid                        ## SOMETIMES_CONSUMES ## Event
   gEdkiiStatusCodeDataTypeVariableGuid          ## SOMETIMES_CONSUMES ## GUID
   gEfiEventReadyToBootGuid                      ## CONSUMES           ## Event
+  gMuReadyToProcessCapsulesNotifyGuid
+  gEfiEndOfDxeEventGroupGuid
+  gEfiMemoryOverwriteControlDataGuid
 
 [Protocols]
   gEfiBdsArchProtocolGuid                       ## PRODUCES
   gEfiSimpleTextInputExProtocolGuid             ## CONSUMES
   gEdkiiVariableLockProtocolGuid                ## SOMETIMES_CONSUMES
   gEfiDeferredImageLoadProtocolGuid             ## CONSUMES
+  gEfiAbsolutePointerProtocolGuid               ## CONSUMES
+  gEfiGenericMemTestProtocolGuid
+  gEfiDxeSmmReadyToLockProtocolGuid
 
 [Pcd]
   gEfiMdePkgTokenSpaceGuid.PcdHardwareErrorRecordLevel                ## CONSUMES
